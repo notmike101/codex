@@ -157,10 +157,13 @@ impl ThreadMetadataSync {
         let advances_recency = items
             .iter()
             .any(|item| matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(_))));
-        let mut update = if affects_metadata {
+        let update = if affects_metadata {
             self.observe_items(items)?
         } else {
-            thread_updated_at_touch()
+            Some(thread_updated_at_touch())
+        };
+        let Some(mut update) = update else {
+            return Ok(None);
         };
         if advances_recency {
             update.advance_recency_at = Some(Utc::now());

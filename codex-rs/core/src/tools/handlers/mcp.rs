@@ -18,6 +18,7 @@ use crate::tools::registry::ToolTelemetryTags;
 use codex_mcp::ToolInfo;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
+use codex_tools::ResponsesApiTool;
 use codex_tools::ToolName;
 use codex_tools::ToolSearchInfo;
 use codex_tools::ToolSearchSourceInfo;
@@ -252,6 +253,196 @@ fn create_tool_spec(tool_info: &ToolInfo) -> Result<ToolSpec, serde_json::Error>
         description,
         tools: vec![ResponsesApiNamespaceTool::Function(tool)],
     }))
+}
+
+/// Returns the flat (single-string) tool name for an MCP tool:
+///   mcp__{callable_namespace}__{callable_name}
+fn mcp_flat_name(tool_info: &ToolInfo) -> String {
+    ensure_mcp_prefix(&format!(
+        "{}{MCP_TOOL_NAME_DELIMITER}{}",
+        tool_info.callable_namespace,
+        tool_info.callable_name,
+    ))
+}
+
+/// Create a `ToolSpec::Function` with a flat name for OSS/local providers.
+/// This exposes MCP tools as ordinary function-call tools instead of namespace
+/// tools, which local OpenAI-compatible servers are much more likely to handle.
+pub fn create_flat_tool_spec(tool_info: &ToolInfo) -> Result<ToolSpec, serde_json::Error> {
+    let flat_name = mcp_flat_name(tool_info);
+    let tool_name = ToolName::plain(&flat_name);
+    let tool = mcp_tool_to_responses_api_tool(&tool_name, &tool_info.tool)?;
+
+    Ok(ToolSpec::Function(ResponsesApiTool {
+        name: flat_name,
+        description: tool.description,
+        strict: tool.strict,
+        defer_loading: tool.defer_loading,
+        parameters: tool.parameters,
+        output_schema: tool.output_schema,
+    }))
+}
+
+/// Flat MCP handler that produces `ToolSpec::Function` instead of
+/// `ToolSpec::Namespace`. Used by OSS (open-source) providers that do not
+/// support namespace-shaped tools.
+pub struct McpFlatHandler {
+    tool_info: ToolInfo,
+    spec: ToolSpec,
+    flat_hook_name: String,
+}
+
+impl McpFlatHandler {
+    pub fn new(tool_info: ToolInfo) -> Result<Self, serde_json::Error> {
+        let spec = create_flat_tool_spec(&tool_info)?;
+        let flat_hook_name = mcp_flat_name(&tool_info);
+        Ok(Self { tool_info, spec, flat_hook_name })
+    }
+
+    fn hook_tool_name(&self) -> HookToolName {
+        HookToolName::new(self.flat_hook_name.clone())
+    }
+}
+
+impl ToolExecutor<ToolInvocation> for McpFlatHandler {
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain(&self.flat_hook_name)
+    }
+
+    fn spec(&self) -> ToolSpec {
+        self.spec.clone()
+    }
+
+    fn supports_parallel_tool_calls(&self) -> bool {
+        self.tool_info.supports_parallel_tool_calls
+            || self
+                .tool_info
+                .tool
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.read_only_hint)
+                .unwrap_or(false)
+    }
+
+    fn search_info(&self) -> Option<ToolSearchInfo> {
+        None
+    }
+
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call(invocation))
+    }
+}
+
+impl McpFlatHandler {
+    async fn handle_call(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
+        let ToolInvocation {
+            session,
+            turn,
+            call_id,
+            payload,
+            ..
+        } = invocation;
+
+        let payload = match payload {
+            ToolPayload::Function { arguments } => arguments,
+            _ => {
+                return Err(FunctionCallError::RespondToModel(
+                    "mcp flat handler received unsupported payload".to_string(),
+                ));
+            }
+        };
+
+        let started = Instant::now();
+        let result = handle_mcp_tool_call(
+            Arc::clone(&session),
+            &turn,
+            call_id.clone(),
+            self.tool_info.server_name.clone(),
+            self.tool_info.tool.name.to_string(),
+            self.hook_tool_name(),
+            payload,
+        )
+        .await;
+
+        Ok(boxed_tool_output(McpToolOutput {
+            result: result.result,
+            tool_input: result.tool_input,
+            wall_time: started.elapsed(),
+            original_image_detail_supported: can_request_original_image_detail(&turn.model_info),
+            truncation_policy: turn.truncation_policy,
+        }))
+    }
+}
+
+impl CoreToolRuntime for McpFlatHandler {
+    fn telemetry_tags<'a>(
+        &'a self,
+        _invocation: &'a ToolInvocation,
+    ) -> futures::future::BoxFuture<'a, ToolTelemetryTags> {
+        Box::pin(async {
+            let mut tags = vec![("mcp_server", self.tool_info.server_name.clone())];
+            if let Some(origin) = &self.tool_info.server_origin {
+                tags.push(("mcp_server_origin", origin.clone()));
+            }
+            tags
+        })
+    }
+
+    fn pre_tool_use_payload(&self, invocation: &ToolInvocation) -> Option<PreToolUsePayload> {
+        let ToolPayload::Function { arguments } = &invocation.payload else {
+            return None;
+        };
+
+        Some(PreToolUsePayload {
+            tool_name: self.hook_tool_name(),
+            tool_input: mcp_hook_tool_input(arguments),
+        })
+    }
+
+    fn with_updated_hook_input(
+        &self,
+        mut invocation: ToolInvocation,
+        updated_input: Value,
+    ) -> Result<ToolInvocation, FunctionCallError> {
+        invocation.payload = match invocation.payload {
+            ToolPayload::Function { .. } => ToolPayload::Function {
+                arguments: serde_json::to_string(&updated_input).map_err(|err| {
+                    FunctionCallError::RespondToModel(format!(
+                        "failed to serialize rewritten MCP arguments: {err}"
+                    ))
+                })?,
+            },
+            payload => {
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "tool {} does not support hook input rewriting for payload {payload:?}",
+                    self.tool_name()
+                )));
+            }
+        };
+        Ok(invocation)
+    }
+
+    fn post_tool_use_payload(
+        &self,
+        invocation: &ToolInvocation,
+        result: &dyn crate::tools::context::ToolOutput,
+    ) -> Option<PostToolUsePayload> {
+        let ToolPayload::Function { .. } = &invocation.payload else {
+            return None;
+        };
+
+        let tool_response =
+            result.post_tool_use_response(&invocation.call_id, &invocation.payload)?;
+        Some(PostToolUsePayload {
+            tool_name: self.hook_tool_name(),
+            tool_use_id: invocation.call_id.clone(),
+            tool_input: result.post_tool_use_input(&invocation.payload)?,
+            tool_response,
+        })
+    }
 }
 
 fn mcp_hook_tool_input(raw_arguments: &str) -> Value {
@@ -526,7 +717,7 @@ mod tests {
             server_origin: None,
             callable_name: tool_name.to_string(),
             callable_namespace: callable_namespace.to_string(),
-            namespace_description: None,
+            namespace_description: Some(format!("Tools from {server_name}.")),
             tool: rmcp::model::Tool::new_with_raw(
                 tool_name.to_string(),
                 None,

@@ -218,6 +218,21 @@ impl ModelProvider for ConfiguredModelProvider {
         &self.info
     }
 
+    fn capabilities(&self) -> ProviderCapabilities {
+        if self.info.is_oss() {
+            // OSS providers (local OpenAI-compatible servers) do not support
+            // hosted-only capabilities. Disable namespace tools, image generation,
+            // and web search so Codex falls back to flat function tools.
+            ProviderCapabilities {
+                namespace_tools: false,
+                image_generation: false,
+                web_search: false,
+            }
+        } else {
+            ProviderCapabilities::default()
+        }
+    }
+
     fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.auth_manager.clone()
     }

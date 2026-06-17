@@ -1503,3 +1503,114 @@ async fn hosted_tools_follow_provider_auth_model_and_config_gates() {
     .await;
     unsupported_provider.assert_visible_lacks(&["web_search"]);
 }
+
+fn use_oss_provider(turn: &mut TurnContext) {
+    // OSS provider name is "gpt-oss" (set by create_oss_provider_with_base_url).
+    // is_oss() returns true when name == "gpt-oss", which disables namespace tools.
+    let provider_info = ModelProviderInfo {
+        name: "gpt-oss".into(),
+        base_url: Some("http://localhost:1234".parse().unwrap()),
+        env_key: None,
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        aws: None,
+        wire_api: codex_model_provider_info::WireApi::Responses,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: None,
+        stream_max_retries: None,
+        stream_idle_timeout_ms: None,
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+    };
+    update_config(turn, |config| {
+        config.model_provider_id = "gpt-oss".to_string();
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
+#[tokio::test]
+async fn oss_provider_sees_flat_mcp_tools() {
+    let plan = probe_with(
+        |turn| {
+            use_oss_provider(turn);
+        },
+        ToolPlanInputs {
+            mcp_tools: Some(vec![mcp_tool("chrome-devtools", "chrome-devtools", "new_page")]),
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+
+    // OSS provider should see the flat MCP tool name.
+    plan.assert_visible_contains(&["mcp__chrome-devtools__new_page"]);
+    // Should NOT see a namespace.
+    plan.assert_visible_lacks(&["chrome-devtools"]);
+}
+
+#[tokio::test]
+async fn oss_provider_does_not_see_tool_search() {
+    let plan = probe_with(
+        |turn| {
+            use_oss_provider(turn);
+            turn.model_info.supports_search_tool = true;
+        },
+        ToolPlanInputs {
+            deferred_mcp_tools: Some(vec![mcp_tool("memory", "memory", "create_entities")]),
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+
+    // tool_search should be absent since OSS providers don't support namespace tools.
+    plan.assert_visible_lacks(&["tool_search"]);
+}
+
+#[tokio::test]
+async fn oss_provider_deferred_mcp_tools_become_direct() {
+    let plan = probe_with(
+        |turn| {
+            use_oss_provider(turn);
+            turn.model_info.supports_search_tool = true;
+        },
+        ToolPlanInputs {
+            deferred_mcp_tools: Some(vec![mcp_tool("memory", "memory", "create_entities")]),
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+
+    // Deferred MCP tools should become direct flat tools for OSS providers.
+    plan.assert_visible_contains(&["mcp__memory__create_entities"]);
+    plan.assert_registered_contains(&["mcp__memory__create_entities"]);
+    assert_eq!(
+        plan.exposure("mcp__memory__create_entities"),
+        ToolExposure::Direct
+    );
+}
+
+#[tokio::test]
+async fn hosted_provider_mcp_behavior_unchanged() {
+    // Verify that hosted model MCP namespace behavior still works.
+    let plan = probe_with(
+        |turn| {
+            // default provider (hosted) -- do not call use_oss_provider.
+        },
+        ToolPlanInputs {
+            mcp_tools: Some(vec![mcp_tool("filesystem", "filesystem", "read_file")]),
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+
+    // Hosted provider should see namespace-shaped MCP tools.
+    plan.assert_visible_contains(&["filesystem"]);
+    assert_eq!(
+        plan.namespace_function_names("filesystem"),
+        &["read_file".to_string()]
+    );
+}

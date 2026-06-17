@@ -403,6 +403,12 @@ impl ModelProviderInfo {
     pub fn has_command_auth(&self) -> bool {
         self.auth.is_some()
     }
+
+    /// Returns true when this provider is an OSS (open-source) provider created
+    /// via `--oss` / `--local-provider` (e.g. LM Studio, Ollama).
+    pub fn is_oss(&self) -> bool {
+        self.name == "gpt-oss"
+    }
 }
 
 pub const DEFAULT_LMSTUDIO_PORT: u16 = 1234;

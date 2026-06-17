@@ -16,6 +16,8 @@ use crate::tools::handlers::ListAvailablePluginsToInstallHandler;
 use crate::tools::handlers::ListMcpResourceTemplatesHandler;
 use crate::tools::handlers::ListMcpResourcesHandler;
 use crate::tools::handlers::McpHandler;
+use crate::tools::handlers::McpFlatHandler;
+
 use crate::tools::handlers::NewContextWindowHandler;
 use crate::tools::handlers::PlanHandler;
 use crate::tools::handlers::ReadMcpResourceHandler;
@@ -860,26 +862,50 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
     )
 )]
 fn add_mcp_runtime_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
+    let use_flat = !namespace_tools_enabled(context.turn_context);
+
     if let Some(mcp_tools) = context.mcp_tools {
         for tool in mcp_tools {
-            match McpHandler::new(tool.clone()) {
-                Ok(handler) => planned_tools.add(handler),
-                Err(err) => warn!(
-                    "Skipping MCP tool `{}`: failed to build tool spec: {err}",
-                    tool.canonical_tool_name()
-                ),
+            if use_flat {
+                match McpFlatHandler::new(tool.clone()) {
+                    Ok(handler) => planned_tools.add(handler),
+                    Err(err) => warn!(
+                        "Skipping MCP tool `{}`: failed to build tool spec: {err}",
+                        tool.canonical_tool_name()
+                    ),
+                }
+            } else {
+                match McpHandler::new(tool.clone()) {
+                    Ok(handler) => planned_tools.add(handler),
+                    Err(err) => warn!(
+                        "Skipping MCP tool `{}`: failed to build tool spec: {err}",
+                        tool.canonical_tool_name()
+                    ),
+                }
             }
         }
     }
 
     if let Some(deferred_mcp_tools) = context.deferred_mcp_tools {
         for tool in deferred_mcp_tools {
-            match McpHandler::new(tool.clone()) {
-                Ok(handler) => planned_tools.add_with_exposure(handler, ToolExposure::Deferred),
-                Err(err) => warn!(
-                    "Skipping deferred MCP tool `{}`: failed to build tool spec: {err}",
-                    tool.canonical_tool_name()
-                ),
+            if use_flat {
+                // When namespace tools are disabled, deferred MCP tools become
+                // direct flat tools instead of requiring tool_search.
+                match McpFlatHandler::new(tool.clone()) {
+                    Ok(handler) => planned_tools.add(handler),
+                    Err(err) => warn!(
+                        "Skipping deferred MCP tool `{}`: failed to build tool spec: {err}",
+                        tool.canonical_tool_name()
+                    ),
+                }
+            } else {
+                match McpHandler::new(tool.clone()) {
+                    Ok(handler) => planned_tools.add_with_exposure(handler, ToolExposure::Deferred),
+                    Err(err) => warn!(
+                        "Skipping deferred MCP tool `{}`: failed to build tool spec: {err}",
+                        tool.canonical_tool_name()
+                    ),
+                }
             }
         }
     }
