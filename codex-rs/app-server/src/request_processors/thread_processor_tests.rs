@@ -989,6 +989,31 @@ mod thread_processor_behavior_tests {
         Ok(())
     }
 
+    #[test]
+    fn normalize_thread_start_model_provider_drops_android_remote_openai_default() {
+        assert_eq!(
+            normalize_thread_start_model_provider_for_client(
+                Some("openai".to_string()),
+                Some("codex_chatgpt_android_remote"),
+            ),
+            None
+        );
+        assert_eq!(
+            normalize_thread_start_model_provider_for_client(
+                Some("custom".to_string()),
+                Some("codex_chatgpt_android_remote"),
+            ),
+            Some("custom".to_string())
+        );
+        assert_eq!(
+            normalize_thread_start_model_provider_for_client(
+                Some("openai".to_string()),
+                Some("codex_desktop"),
+            ),
+            Some("openai".to_string())
+        );
+    }
+
     #[tokio::test]
     async fn read_summary_from_rollout_returns_empty_preview_when_no_user_message() -> Result<()> {
         use codex_protocol::protocol::RolloutItem;

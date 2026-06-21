@@ -160,6 +160,18 @@ fn merge_persisted_resume_metadata(
     }
 }
 
+fn normalize_thread_start_model_provider_for_client(
+    model_provider: Option<String>,
+    app_server_client_name: Option<&str>,
+) -> Option<String> {
+    if app_server_client_name == Some("codex_chatgpt_android_remote")
+        && model_provider.as_deref() == Some("openai")
+    {
+        return None;
+    }
+    model_provider
+}
+
 fn normalize_thread_list_cwd_filters(
     cwd: Option<ThreadListCwdFilter>,
 ) -> Result<Option<Vec<PathBuf>>, JSONRPCErrorError> {
@@ -917,6 +929,11 @@ impl ThreadRequestProcessor {
         let environment_selections =
             resolve_turn_environment_selections(self.thread_manager.as_ref(), environments)?;
         let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
+
+        let model_provider = normalize_thread_start_model_provider_for_client(
+            model_provider,
+            app_server_client_name.as_deref(),
+        );
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
             model_provider,
@@ -2623,6 +2640,11 @@ impl ThreadRequestProcessor {
 
         let history_cwd = thread_history.session_cwd();
         let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
+
+        let model_provider = normalize_thread_start_model_provider_for_client(
+            model_provider,
+            app_server_client_name.as_deref(),
+        );
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
             model_provider,
@@ -3355,6 +3377,11 @@ impl ThreadRequestProcessor {
             Some(cli_overrides)
         };
         let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
+
+        let model_provider = normalize_thread_start_model_provider_for_client(
+            model_provider,
+            app_server_client_name.as_deref(),
+        );
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
             model_provider,
